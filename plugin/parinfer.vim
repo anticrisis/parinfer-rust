@@ -210,7 +210,7 @@ function! s:initialize_buffer() abort
 endfunction
 
 augroup Parinfer
-  autocmd FileType clojure,scheme,lisp,racket,hy call <SID>initialize_buffer()
+  autocmd FileType arclite,clojure,scheme,lisp,racket,hy call <SID>initialize_buffer()
 augroup END
 
 " vim:set sts=2 sw=2 ai et foldmethod=marker:
