@@ -87,14 +87,6 @@ mod reference_hack {
     use std::ptr;
     use winapi::um::libloaderapi::{GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW};
 
-    // use std::ffi::OsStr;
-    // use std::iter::once;
-    // use std::os::windows::ffi::OsStrExt;
-    
-    // fn winapi_str<T: AsRef<OsStr>>(input: T) -> Vec<u16> {
-    //     input.as_ref().encode_wide().chain(once(0)).collect()
-    // }
-
     pub fn initialize() {
         unsafe {
             let mut out = ptr::null_mut();
