@@ -1,134 +1,10 @@
-use difference::*;
-
-/// A ChangeGroup is a (possibly empty) bit of unchanged leading text followed
-/// by added and removed text.
-///
-/// The order of the added and removed text doesn't matter to us since we want
-/// to make one big replace or delete from it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ChangeGroup {
-    unchanged_leader: String,
-    added_text: String,
-    removed_text: String
-}
-
-impl ChangeGroup {
-    fn has_changes(&self) -> bool {
-        !self.added_text.is_empty() || !self.removed_text.is_empty()
-    }
-
-    fn new() -> ChangeGroup {
-        ChangeGroup {
-            unchanged_leader: String::new(),
-            added_text: String::new(),
-            removed_text: String::new()
-        }
-    }
-}
-
-fn group_changeset(changeset: Vec<Difference>) -> Vec<ChangeGroup> {
-    let mut result: Vec<ChangeGroup> = vec![ChangeGroup::new()];
-    for change in changeset {
-        match change {
-            Difference::Same(s) => {
-                if result.last().unwrap().has_changes() {
-                    result.push(ChangeGroup::new());
-                }
-                result.last_mut().unwrap().unchanged_leader += &s;
-            },
-            Difference::Add(s) => {
-                result.last_mut().unwrap().added_text += &s;
-            },
-            Difference::Rem(s) => {
-                result.last_mut().unwrap().removed_text += &s;
-            }
-        }
-    }
-    if !result.last().unwrap().has_changes() {
-        result.pop();
-    }
-    result
-}
-
-#[cfg(test)]
-#[test]
-pub fn group_changeset_works() {
-    assert_eq!(group_changeset(vec![]), vec![]);
-    assert_eq!(
-        group_changeset(vec![
-            Difference::Same("hello".to_string()),
-            Difference::Same(", world".to_string()),
-            Difference::Add("foo".to_string())
-        ]),
-        vec![ChangeGroup {
-            unchanged_leader: String::from("hello, world"),
-            added_text: String::from("foo"),
-            removed_text: String::from("")
-        }],
-        "it collects and combines unchanged_leader text"
-    );
-    assert_eq!(
-        group_changeset(vec![
-            Difference::Same("hello".to_string()),
-            Difference::Add("there".to_string()),
-            Difference::Add("!".to_string())
-        ]),
-        vec![ChangeGroup {
-            unchanged_leader: "hello".to_string(),
-            added_text: "there!".to_string(),
-            removed_text: "".to_string()
-        }],
-        "it collects and combines added_text text"
-    );
-    assert_eq!(
-        group_changeset(vec![
-            Difference::Rem("hello".to_string()),
-            Difference::Rem("there".to_string()),
-            Difference::Add("!".to_string())
-        ]),
-        vec![ChangeGroup {
-            unchanged_leader: "".to_string(),
-            added_text: "!".to_string(),
-            removed_text: "hellothere".to_string()
-        }],
-        "it collects and combines removed_text text"
-    );
-    assert_eq!(
-        group_changeset(vec![
-            Difference::Rem("hello".to_string()),
-            Difference::Same("there".to_string()),
-            Difference::Add("!".to_string())
-        ]),
-        vec![ChangeGroup {
-            unchanged_leader: "".to_string(),
-            added_text: "".to_string(),
-            removed_text: "hello".to_string()
-        }, ChangeGroup {
-            unchanged_leader: "there".to_string(),
-            added_text: "!".to_string(),
-            removed_text: "".to_string()
-        }],
-        "it starts a new change when seeing a 'Same' node"
-    );
-    assert_eq!(
-        group_changeset(vec![
-            Difference::Rem("hello".to_string()),
-            Difference::Same("there".to_string()),
-            Difference::Same("!".to_string())
-        ]),
-        vec![ChangeGroup {
-            unchanged_leader: "".to_string(),
-            added_text: "".to_string(),
-            removed_text: "hello".to_string()
-        }],
-        "it doesn't return a trailing node without changes"
-    );
-}
+use parinfer::chomp_cr;
+use types::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Coord {
-    pub line: u64,
-    pub column: u64
+    pub line: LineNumber,
+    pub column: Column
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,8 +15,8 @@ pub struct Selection {
 
 impl Selection {
     fn new(
-        anchor_line: u64, anchor_column: u64, cursor_line: u64,
-        cursor_column: u64) -> Selection
+        anchor_line: LineNumber, anchor_column: Column, cursor_line: LineNumber,
+        cursor_column: Column) -> Selection
     {
         Selection {
             anchor: Coord {
@@ -162,7 +38,7 @@ pub struct Insertion {
 }
 
 impl Insertion {
-    fn new(cursor_line: u64, cursor_column: u64, text: &str) -> Insertion {
+    fn new(cursor_line: LineNumber, cursor_column: Column, text: &str) -> Insertion {
         Insertion {
             cursor: Coord {
                 line: cursor_line,
@@ -179,96 +55,147 @@ pub struct Fixes {
     pub insertions: Vec<Insertion>
 }
 
-fn advance(pos: Coord, s: &str) -> (Coord, Coord) {
-    let mut pos = pos;
-    let mut previous = pos.clone();
-    for ch in s.chars() {
-        previous = pos.clone();
-        if ch == '\n' {
-            pos.line += 1;
-            pos.column = 1;
-        } else {
-            pos.column += 1;
-        }
-    }
-    (previous, pos)
-}
-
 pub fn fixes<'a>(from: &'a str, to: &'a str) -> Fixes {
-    let (_, changeset) = diff(from, to, "");
     let mut result = Fixes {
         insertions: vec![],
         deletions: vec![]
     };
-    let mut pos = Coord {
-        line: 1,
-        column: 1
-    };
-    let change_groups = group_changeset(changeset);
-    for change_group in change_groups.clone() {
-        pos = advance(pos, &change_group.unchanged_leader).1;
-        if !change_group.removed_text.is_empty() {
-            let anchor = pos.clone();
-            let advanced = advance(pos, &change_group.removed_text);
-            pos = advanced.1;
-            let cursor = advanced.0;
 
-            result.deletions.push(Selection {
-                anchor,
-                cursor
-            });
+    let mut line: LineNumber = 1;
+    for (a_line, b_line) in from.split('\n').map(chomp_cr).zip(to.split('\n').map(chomp_cr)) {
+        if a_line != b_line {
+            result.deletions.push(Selection::new(line, 1, line, a_line.chars().count()));
+            if b_line != "" {
+                result.insertions.push(Insertion::new(line, 1, b_line));
+            }
         }
+        line += 1;
     }
-    pos = Coord {
-        line: 1,
-        column: 1
-    };
-    for change_group in change_groups {
-        pos = advance(pos, &change_group.unchanged_leader).1;
-        if !change_group.added_text.is_empty() {
-            result.insertions.push(Insertion {
-                cursor: pos.clone(),
-                text: change_group.added_text
-            });
-        }
-    }
+
     result
 }
 
+fn escape(s: &str) -> String {
+    s.replace("'", "''")
+}
+
+fn delete_script(fixes: &Fixes) -> String {
+    if fixes.deletions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "select {}\nexec '\\<a-d>'\n",
+            fixes
+                .deletions
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{}.{},{}.{}",
+                        d.anchor.line,
+                        d.anchor.column,
+                        d.cursor.line,
+                        d.cursor.column
+                    )
+                })
+                .fold(String::new(), |acc, s| acc + " " + &s)
+        )
+    }
+}
+
+fn insert_script(fixes: &Fixes) -> String {
+    if fixes.insertions.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "select {}
+             set-register '\"' {}
+             exec '\\P'",
+            fixes
+                .insertions
+                .iter()
+                .map(|i| {
+                    format!(
+                        "{}.{},{}.{}",
+                        i.cursor.line,
+                        i.cursor.column,
+                        i.cursor.line,
+                        i.cursor.column
+                    )
+                })
+                .fold(String::new(), |acc, s| acc + " " + &s),
+            fixes
+                .insertions
+                .iter()
+                .map(|i| {
+                    format!("'{}'", escape(&i.text))
+                })
+                .fold(String::new(), |acc, s| acc + " " + &s)
+        )
+    }
+}
+
+fn cursor_script(request: &Request, answer: &Answer) -> String {
+    match (request.options.cursor_line, request.options.cursor_x, answer.cursor_line, answer.cursor_x) {
+        (Some(r_line), Some(r_x), Some(a_line), Some(a_x)) if r_line == a_line && r_x == a_x => String::new(),
+        (_, _, Some(line), Some(x)) => format!("set buffer parinfer_cursor_char_column {}
+                                                set buffer parinfer_cursor_line {}",
+                                               x + 1, line + 1),
+        _ => String::new()
+    }
+}
+
+pub fn kakoune_output(request: &Request, answer: Answer) -> (String, i32) {
+    if answer.success {
+        let fixes = fixes(&request.text, &answer.text);
+        let script = format!("{}\n{}\n{}", delete_script(&fixes), insert_script(&fixes),
+                             cursor_script(&request, &answer));
+
+        ( script, 0 )
+    } else {
+        let error_msg = match answer.error {
+            None => String::from("unknown error."),
+            Some(e) => e.message
+        };
+
+        ( format!("fail '{}'\n", escape(&error_msg)), 0 )
+    }
+}
+
 #[cfg(test)]
-#[test]
-pub fn fixes_works() {
-    assert_eq!(
-        fixes("abc", "abc"),
-        Fixes {
-            deletions: vec![],
-            insertions: vec![]
-        },
-        "it can handle no changes"
-    );
-    assert_eq!(
-        fixes("abcd", "axcy"),
-        Fixes {
-            deletions: vec![
-                Selection::new(1,2,1,2),
-                Selection::new(1,4,1,4)
-            ],
-            insertions: vec![
-                Insertion::new(1,2,"x"),
-                Insertion::new(1,3,"y")
-            ]
-        },
-        "it can produce a replacement for a single changed letter"
-    );
-    assert_eq!(
-        fixes("hello, worxxyz", "herxx"),
-        Fixes {
-            deletions: vec![
-                Selection::new(1,3,1,9),
-                Selection::new(1,13,1,14)
-            ],
-            insertions: vec![]
-        },
-        "it can produce a longer deletion"
-    );
+mod test {
+    use super::*;
+
+    #[test]
+    pub fn fixes_works() {
+        assert_eq!(
+            fixes("abc", "abc"),
+            Fixes {
+                deletions: vec![],
+                insertions: vec![]
+            },
+            "it can handle no changes"
+        );
+        assert_eq!(
+            fixes("abcd", "axcy"),
+            Fixes {
+                deletions: vec![
+                    Selection::new(1,1,1,4),
+                ],
+                insertions: vec![
+                    Insertion::new(1,1,"axcy"),
+                ]
+            },
+            "it can produce a replacement for a single changed letter"
+        );
+        assert_eq!(
+            fixes("hello, worxxyz", ""),
+            Fixes {
+                deletions: vec![
+                    Selection::new(1,1,1,14)
+                ],
+                insertions: vec![]
+            },
+            "it can produce a longer deletion"
+        );
+    }
 }
